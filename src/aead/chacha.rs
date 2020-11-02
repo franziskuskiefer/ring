@@ -16,13 +16,32 @@
 use super::{counter, iv::Iv, quic::Sample, BLOCK_LEN};
 use crate::{c, endian::*};
 
+use hacspec_lib::*;
+
 #[repr(C)]
-pub struct Key([u8; KEY_LEN]);
+pub struct Key([U8; KEY_LEN]);
+#[repr(C)]
+pub struct UnsafeKey([u8; KEY_LEN]);
 
 impl From<[u8; KEY_LEN]> for Key {
     #[inline]
     fn from(value: [u8; KEY_LEN]) -> Self {
-        Self(value)
+        let mut bytes = [U8(0); KEY_LEN];
+        for (out, b) in bytes.iter_mut().zip(value.iter().map(|&b| U8::classify(b))) {
+            *out = b;
+        }
+        Self(bytes)
+    }
+}
+
+impl From<[U8; KEY_LEN]> for UnsafeKey {
+    #[inline]
+    fn from(value: [U8; KEY_LEN]) -> Self {
+        let mut bytes = [0u8; KEY_LEN];
+        for (out, b) in bytes.iter_mut().zip(value.iter()) {
+            *out = b.declassify();
+        }
+        Self(bytes)
     }
 }
 
@@ -114,12 +133,13 @@ impl Key {
                 out: *mut u8,
                 in_: *const u8,
                 in_len: c::size_t,
-                key: &Key,
+                key: &UnsafeKey,
                 first_iv: &Iv,
             );
         }
 
-        GFp_ChaCha20_ctr32(output, input, in_out_len, self, &iv);
+        let key_slice = UnsafeKey::from(self.0);
+        GFp_ChaCha20_ctr32(output, input, in_out_len, &key_slice, &iv);
     }
 }
 

@@ -22,15 +22,34 @@ use super::{
 use crate::{bssl, c, error};
 use core::convert::TryInto;
 
+use hacspec_lib::*;
+
 /// A Poly1305 key.
-pub struct Key([u8; KEY_LEN]);
+pub struct Key([U8; KEY_LEN]);
+
+pub struct UnsafeKey([u8; KEY_LEN]);
 
 const KEY_LEN: usize = 2 * BLOCK_LEN;
 
 impl From<[u8; KEY_LEN]> for Key {
     #[inline]
     fn from(value: [u8; KEY_LEN]) -> Self {
-        Self(value)
+        let mut bytes = [U8(0); KEY_LEN];
+        for (out, b) in bytes.iter_mut().zip(value.iter().map(|&b| U8::classify(b))) {
+            *out = b;
+        }
+        Self(bytes)
+    }
+}
+
+impl From<[U8; KEY_LEN]> for UnsafeKey {
+    #[inline]
+    fn from(value: [U8; KEY_LEN]) -> Self {
+        let mut bytes = [0u8; KEY_LEN];
+        for (out, b) in bytes.iter_mut().zip(value.iter()) {
+            *out = b.declassify();
+        }
+        Self(bytes)
     }
 }
 
@@ -55,12 +74,12 @@ impl Context {
                 len: c::size_t,
                 should_pad: Pad,
             );
-            fn GFp_poly1305_emit(state: &mut Opaque, tag: &mut Tag, nonce: &Nonce);
+            fn GFp_poly1305_emit(state: &mut Opaque, tag: &mut Tag, nonce: &UnsafeNonce);
         }
 
         let (key, nonce) = key_and_nonce.split_at(BLOCK_LEN);
-        let key: [u8; BLOCK_LEN] = key.try_into().unwrap();
-        let nonce: [u8; BLOCK_LEN] = nonce.try_into().unwrap();
+        let key: [U8; BLOCK_LEN] = key.try_into().unwrap();
+        let nonce: [U8; BLOCK_LEN] = nonce.try_into().unwrap();
 
         let key = DerivedKey(key);
         let nonce = Nonce(nonce);
@@ -119,17 +138,45 @@ pub fn check_state_layout() {
 }
 
 #[repr(C)]
-struct DerivedKey([u8; BLOCK_LEN]);
+struct DerivedKey([U8; BLOCK_LEN]);
+
+#[repr(C)]
+struct UnsafeDerivedKey([u8; BLOCK_LEN]);
+
+impl From<DerivedKey> for UnsafeDerivedKey {
+    #[inline]
+    fn from(value: DerivedKey) -> UnsafeDerivedKey {
+        let mut bytes = [0u8; BLOCK_LEN];
+        for (out, b) in bytes.iter_mut().zip(value.0.iter()) {
+            *out = b.declassify();
+        }
+        Self(bytes)
+    }
+}
 
 /// This is *not* an "AEAD nonce"; it's a Poly1305-specific nonce.
 #[repr(C)]
-struct Nonce([u8; BLOCK_LEN]);
+struct Nonce([U8; BLOCK_LEN]);
+
+#[repr(C)]
+struct UnsafeNonce([u8; BLOCK_LEN]);
+
+impl From<&Nonce> for UnsafeNonce {
+    #[inline]
+    fn from(value: &Nonce) -> UnsafeNonce {
+        let mut bytes = [0u8; BLOCK_LEN];
+        for (out, b) in bytes.iter_mut().zip(value.0.iter()) {
+            *out = b.declassify();
+        }
+        Self(bytes)
+    }
+}
 
 #[repr(C)]
 struct Funcs {
     blocks_fn:
         unsafe extern "C" fn(&mut Opaque, input: *const u8, input_len: c::size_t, should_pad: Pad),
-    emit_fn: unsafe extern "C" fn(&mut Opaque, &mut Tag, nonce: &Nonce),
+    emit_fn: unsafe extern "C" fn(&mut Opaque, &mut Tag, nonce: &UnsafeNonce),
 }
 
 #[inline]
@@ -137,11 +184,11 @@ fn init(state: &mut Opaque, key: DerivedKey, func: &mut Funcs) -> Result<(), err
     extern "C" {
         fn GFp_poly1305_init_asm(
             state: &mut Opaque,
-            key: &DerivedKey,
+            key: &UnsafeDerivedKey,
             out_func: &mut Funcs,
         ) -> bssl::Result;
     }
-    Result::from(unsafe { GFp_poly1305_init_asm(state, &key, func) })
+    Result::from(unsafe { GFp_poly1305_init_asm(state, &UnsafeDerivedKey::from(key), func) })
 }
 
 #[repr(u32)]
@@ -162,7 +209,7 @@ impl Funcs {
     fn emit(&self, state: &mut Opaque, nonce: &Nonce) -> Tag {
         let mut tag = Tag([0u8; TAG_LEN]);
         unsafe {
-            (self.emit_fn)(state, &mut tag, nonce);
+            (self.emit_fn)(state, &mut tag, &UnsafeNonce::from(nonce));
         }
         tag
     }
